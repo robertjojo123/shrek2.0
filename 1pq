@@ -1,0 +1,195 @@
+local monitor = peripheral.find("monitor")
+local backSide = "back"  -- Redstone input from tape drive controller
+
+if not monitor then
+    error("No monitor found! Connect a monitor to this computer.", 0)
+end
+
+-- Redirect output to the monitor
+term.redirect(monitor)
+monitor.setTextScale(0.5)  -- Adjust for better rendering
+monitor.setBackgroundColor(colors.black)
+monitor.clear()
+
+-- Detect computer name and assign quadrant
+local computerLabel = os.getComputerLabel()
+local quadrantMap = {
+    comp0 = "q0",  -- Top-left
+    comp1 = "q1",  -- Top-right
+    comp2 = "q2",  -- Bottom-left
+    comp3 = "q3"   -- Bottom-right
+}
+local quadrant = quadrantMap[computerLabel]
+
+if not quadrant then
+    error("ERROR: Computer name must be comp0, comp1, comp2, or comp3!", 0)
+end
+
+print("This computer is responsible for quadrant:", quadrant)
+
+local baseURL = "https://raw.githubusercontent.com/robertjojo123/shrek2.0/refs/heads/main/video_part_"
+
+local firstVideoDuration = 38000  -- 38s
+local otherVideoDuration = 45000  -- 45s
+local frameInterval = 200          -- 200ms per frame
+local linesPerFrame = 40           -- Each frame consists of 40 lines
+local globalElapsedTime = 0        -- Stores total time since audio started
+
+function getMovieURL(index)
+    return baseURL .. index .. "_" .. quadrant .. ".nfv"
+end
+
+function clearOldVideos()
+    fs.delete("/current_video.nfv")
+    fs.delete("/next_video.nfv")
+end
+
+function downloadVideo(index, filename)
+    local url = getMovieURL(index)
+    local response = http.get(url)
+
+    if response then
+        local file = fs.open(filename, "wb")
+        file.write(response.readAll())
+        file.close()
+        response.close()
+        return true
+    end
+    return false
+end
+
+function loadVideo(videoFile)
+    local videoData = {}
+    for line in io.lines(videoFile) do
+        table.insert(videoData, line)
+    end
+    local resolution = { videoData[1]:match("(%d+) (%d+)") }
+    table.remove(videoData, 1)
+    return videoData, resolution
+end
+
+function playVideo(videoFile, videoStartTime, videoIndex)
+    local videoData, resolution = loadVideo(videoFile)
+    local frameIndex = 1
+    local videoEndTime = videoStartTime + (videoIndex == 1 and firstVideoDuration or otherVideoDuration)
+    local frameStartTime = os.epoch("utc")
+
+    -- **Frame Sync Correction Based on Elapsed Time**
+    local expectedOffset = globalElapsedTime - (videoIndex == 1 and 0 or (firstVideoDuration + ((videoIndex - 2) * otherVideoDuration)))
+    local frameCorrection = math.floor(expectedOffset / frameInterval)
+    frameIndex = frameIndex + (frameCorrection * linesPerFrame)
+
+    function nextFrame()
+        local currentTime = os.epoch("utc")
+        local elapsedTime = currentTime - videoStartTime
+        local expectedFrame = math.floor(elapsedTime / frameInterval) * linesPerFrame
+
+        if expectedFrame > frameIndex then
+            frameIndex = expectedFrame
+        end
+
+        -- Draw Frame on Monitor
+        local frame = {}
+        for i = 1, resolution[2] do
+            if frameIndex + i > #videoData then
+                break
+            end
+            table.insert(frame, videoData[frameIndex + i])
+        end
+        if #frame > 0 then
+            monitor.setCursorPos(1, 1)
+            monitor.clear()
+            for y, line in ipairs(frame) do
+                monitor.setCursorPos(1, y)
+                monitor.write(line)
+            end
+        end
+
+        frameIndex = frameIndex + resolution[2]
+
+        -- Stop playing if past the last frame
+        if frameIndex > #videoData then
+            return false
+        end
+
+        -- **Frame Timing (to catch up if needed)**
+        local elapsedFrameTime = os.epoch("utc") - frameStartTime
+        frameStartTime = os.epoch("utc")
+        local sleepTime = (frameInterval - elapsedFrameTime) / 1000
+        if sleepTime < 0 then
+            sleepTime = 0
+        end
+
+        os.sleep(sleepTime)
+        return true
+    end
+
+    while os.epoch("utc") < videoEndTime do
+        if not nextFrame() then
+            break
+        end
+    end
+end
+
+function trackElapsedTime(globalStartTime)
+    while true do
+        globalElapsedTime = os.epoch("utc") - globalStartTime + 750  -- **Include the initial delay**
+        os.sleep(0.1)
+    end
+end
+
+function playMovie()
+    clearOldVideos()
+    local videoIndex = 1
+    local globalStartTime = nil
+    local videoStartTime = nil
+
+    monitor.setBackgroundColor(colors.black)
+    monitor.clear()
+
+    os.sleep(0.75)  -- **750ms delay before first video starts**
+    globalStartTime = os.epoch("utc") + 750  -- **Adjust global elapsed time**
+    videoStartTime = os.epoch("utc")
+
+    parallel.waitForAny(
+        function()
+            while true do
+                -- **Download and instantly play**
+                if not downloadVideo(videoIndex, "/current_video.nfv") then break end
+                local nextIndex = videoIndex + 1
+                local nextFile = "/next_video.nfv"
+
+                -- **Silently fetch the next video file**
+                downloadVideo(nextIndex, nextFile)
+
+                -- **Instantly play next video with frame sync correction**
+                local expectedElapsedTime = firstVideoDuration + ((videoIndex - 2) * otherVideoDuration)
+                playVideo("/current_video.nfv", videoStartTime, videoIndex)
+                
+                fs.delete("/current_video.nfv")
+
+                if fs.exists(nextFile) then
+                    fs.move(nextFile, "/current_video.nfv")
+                    videoIndex = nextIndex
+                    videoStartTime = globalStartTime + firstVideoDuration + ((videoIndex - 2) * otherVideoDuration)
+                else
+                    break
+                end
+            end
+        end,
+        function()
+            trackElapsedTime(globalStartTime)
+        end
+    )
+end
+
+-- **Main Loop: Wait for Redstone Signal**
+while true do
+    print("Waiting for Redstone signal on the back to start playback...")
+    os.pullEvent("redstone")
+
+    if redstone.getInput(backSide) then
+        print("Redstone signal detected! Starting video playback...")
+        playMovie()
+    end
+end
