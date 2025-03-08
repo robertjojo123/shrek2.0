@@ -38,8 +38,6 @@ function getMovieURL(index)
     local url = baseURL .. index .. "_q" .. string.sub(quadrant, -1) .. ".nfv"
     print("Generated URL:", url) -- Debugging
     return url
-    print("Generated URL:", url)
-    return url
 end
 
 function downloadVideo(index, filename)
