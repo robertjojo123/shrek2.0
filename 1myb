@@ -1,0 +1,178 @@
+local monitor = peripheral.find("monitor")
+local redstoneInput = peripheral.find("redstone")
+local chest = peripheral.find("minecraft:chest") or peripheral.find("minecraft:barrel") or peripheral.find("ironchest:iron_chest")
+local tapeDrive = peripheral.find("tape_drive")
+
+if not monitor then
+    error("No monitor found! Attach a monitor to use this script.", 0)
+end
+
+monitor.setTextScale(0.5)  -- Adjust for large monitors
+
+-- Get computer label to determine role
+local computerID = os.getComputerID()
+local isMaster = (computerID == 0) -- **Computer 0 acts as the master**
+local frameBuffer = {}  -- Stores last drawn frame
+
+-- Set base video URL
+local baseURL = "https://raw.githubusercontent.com/robertjojo123/shrek2.0/refs/heads/main/video_part_"
+
+-- Determine quadrant (comp0, comp1, comp2, comp3)
+local quadrantIndex = tonumber(string.sub(os.getComputerLabel() or "", -1))
+
+if quadrantIndex == nil or quadrantIndex < 0 or quadrantIndex > 3 then
+    error("Error: This computer's label must be 'comp0', 'comp1', 'comp2', or 'comp3'.", 0)
+end
+
+local firstVideoDuration = 38000  -- 38s
+local otherVideoDuration = 45000  -- 45s
+local frameInterval = 200          -- **200ms per frame (5 FPS)**
+local downloadTime = 0             -- **Tracks time spent downloading**
+local frameIndex = 1
+
+function getMovieURL(index)
+    return baseURL .. index .. "_q" .. quadrantIndex .. ".nfv"
+end
+
+function downloadVideo(index, filename)
+    local url = getMovieURL(index)
+    print("Downloading:", url)
+
+    local startTime = os.epoch("utc")  -- Start timing download
+    local response = http.get(url)
+
+    if response then
+        local file = fs.open(filename, "wb")
+        file.write(response.readAll())
+        file.close()
+        response.close()
+
+        downloadTime = os.epoch("utc") - startTime  -- Calculate download time
+        return true
+    else
+        print("Failed to download:", filename)
+    end
+
+    return false
+end
+
+function loadVideo(videoFile)
+    local videoData = {}
+    for line in io.lines(videoFile) do
+        table.insert(videoData, line)
+    end
+    local resolution = { videoData[1]:match("(%d+) (%d+)") }
+    table.remove(videoData, 1)
+    return videoData, resolution
+end
+
+function playVideo(videoFile, videoStartTime, videoIndex)
+    local videoData, resolution = loadVideo(videoFile)
+    if not videoData or not resolution then
+        print("Error loading video data.")
+        return
+    end
+
+    local frameWidth, frameHeight = tonumber(resolution[1]), tonumber(resolution[2])
+    if not frameWidth or not frameHeight then
+        print("Invalid resolution in video file.")
+        return
+    end
+
+    local videoEndTime = videoStartTime + (videoIndex == 1 and firstVideoDuration or otherVideoDuration)
+
+    while os.epoch("utc") < videoEndTime do
+        local frameStartTime = os.epoch("utc")  -- **Start frame timer**
+        
+        -- Ensure frames advance properly
+        local frameSuccess = nextFrame(videoData, frameHeight)
+
+        if not frameSuccess then
+            print("Warning: Frame failed to load, skipping...")
+        end
+
+        frameIndex = frameIndex + frameHeight -- Move to next frame batch
+    end
+end
+
+function nextFrame(videoData, frameHeight)
+    local currentTime = os.epoch("utc")
+    local elapsedTime = currentTime - videoStartTime
+    local expectedFrame = math.floor(elapsedTime / frameInterval) * frameHeight
+
+    if expectedFrame > frameIndex then
+        frameIndex = expectedFrame -- Ensure frame index advances properly
+    end
+
+    -- **Extract frame data from the video file**
+    local frameLines = {}
+    for i = 1, frameHeight do
+        if frameIndex + i > #videoData then
+            break
+        end
+        table.insert(frameLines, videoData[frameIndex + i])
+    end
+
+    if #frameLines == 0 then
+        return false
+    end
+
+    -- **Convert to image & display**
+    local imageData = paintutils.parseImage(table.concat(frameLines, "\n"))
+    term.redirect(monitor)
+    paintutils.drawImage(imageData, 1, 1)
+    term.redirect(term.native())
+
+    return true
+end
+
+function playMovie()
+    local videoIndex = 1
+    local videoStartTime = os.epoch("utc")
+
+    monitor.setBackgroundColor(colors.black)
+    monitor.clear()
+    
+    print("Preparing to play movie...")
+    os.sleep(0.75)  -- **750ms delay before first video starts**
+
+    parallel.waitForAny(
+        function()
+            while true do
+                print("Downloading video part:", videoIndex)
+                if not downloadVideo(videoIndex, "/current_video.nfv") then 
+                    print("No more video parts available, stopping playback.")
+                    break 
+                end
+
+                local nextIndex = videoIndex + 1
+                local nextFile = "/next_video.nfv"
+
+                print("Pre-downloading next part:", nextIndex)
+                downloadVideo(nextIndex, nextFile)
+
+                print("Playing video part:", videoIndex)
+                playVideo("/current_video.nfv", videoStartTime, videoIndex)
+                fs.delete("/current_video.nfv")
+
+                if fs.exists(nextFile) then
+                    fs.move(nextFile, "/current_video.nfv")
+                    videoIndex = nextIndex
+                    videoStartTime = os.epoch("utc") + firstVideoDuration + ((videoIndex - 2) * otherVideoDuration)
+                else
+                    break
+                end
+            end
+        end
+    )
+end
+
+print("Waiting for redstone signal...")
+
+while true do
+    if redstone.getInput("top") or redstone.getInput("bottom") or redstone.getInput("left") or redstone.getInput("right") or redstone.getInput("front") or redstone.getInput("back") then
+        print("Redstone signal detected! Starting movie playback...")
+        playMovie()
+    end
+    os.sleep(0.1)
+end
