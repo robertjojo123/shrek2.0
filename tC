@@ -1,0 +1,97 @@
+local chest = peripheral.find("minecraft:chest") or peripheral.find("minecraft:barrel") or peripheral.find("ironchest:iron_chest")
+local tapeDrive = peripheral.find("tape_drive")
+
+if not chest then
+    error("Error: Chest not found! Check peripheral name.", 0)
+end
+
+if not tapeDrive then
+    error("Error: No tape drive found!", 0)
+end
+
+function correctTapeInserted()
+    if tapeDrive.getLabel then
+        local label = tapeDrive.getLabel()
+        return label and label:lower() == "shrek"
+    end
+    return false
+end
+
+function insertTape()
+    if correctTapeInserted() then return true end
+
+    local items = chest.list()
+    for slot, item in pairs(items) do
+        if item.name == "computronics:tape" then
+            chest.pushItems(peripheral.getName(tapeDrive), slot, 1)
+            os.sleep(1)
+
+            if correctTapeInserted() then
+                return true
+            else
+                tapeDrive.eject()
+                os.sleep(1)
+            end
+        end
+    end
+    return false
+end
+
+function stopTape()
+    if tapeDrive and tapeDrive.isPlaying then
+        tapeDrive.stop()
+        os.sleep(0.5) -- Ensure stop takes effect before rewinding
+    end
+end
+
+function rewindTape()
+    if tapeDrive.getSize and tapeDrive.getPosition then
+        if tapeDrive.getPosition() > 0 then
+            stopTape()  -- **Always stop before rewinding**
+            tapeDrive.seek(-tapeDrive.getSize())
+            os.sleep(2) -- Wait for rewind to complete
+        end
+    end
+end
+
+function ejectTape()
+    stopTape()  -- **Stop before ejecting**
+    if tapeDrive and tapeDrive.getLabel then
+        tapeDrive.eject()
+        os.sleep(1)
+    end
+end
+
+function playTape()
+    if tapeDrive then
+        stopTape() -- **Always ensure the tape is stopped before playing**
+        rewindTape() -- **Rewind before playback**
+        os.sleep(1) -- Short wait to prevent skipping issues
+        tapeDrive.play()
+        print("Tape is now playing!")
+    else
+        print("Error: No tape drive found!")
+    end
+end
+
+function handleTapePlayback()
+    print("Checking for tape...")
+
+    if insertTape() then
+        print("Tape inserted successfully.")
+        playTape()
+    else
+        print("Error: Failed to insert tape!")
+    end
+end
+
+print("Waiting for redstone signal...")
+
+while true do
+    -- **Check for redstone signal from ANY side**
+    if redstone.getInput("top") or redstone.getInput("bottom") or redstone.getInput("left") or redstone.getInput("right") or redstone.getInput("front") or redstone.getInput("back") then
+        print("Redstone signal detected! Starting tape playback...")
+        handleTapePlayback()
+    end
+    os.sleep(0.1)
+end
