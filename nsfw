@@ -1,0 +1,249 @@
+-- **Find Peripherals**
+local monitor = peripheral.find("monitor")
+local chest = peripheral.find("minecraft:chest") or peripheral.find("minecraft:barrel") or peripheral.find("ironchest:iron_chest")
+local tapeDrive = peripheral.find("tape_drive")
+
+if not monitor then
+    error("No monitor found! Attach a monitor to use this script.", 0)
+end
+
+monitor.setTextScale(0.5)  -- Adjust text scale for large monitors
+
+-- **Global Variables**
+local baseURL = "https://raw.githubusercontent.com/robertjojo123/shrek2.0/refs/heads/main/video_part_"
+local firstVideoDuration = 38000  -- 38s
+local otherVideoDuration = 45000  -- 45s
+local frameInterval = 200          -- **200ms per frame (5 FPS)**
+local downloadTime = 0             -- **Tracks time spent downloading**
+local frameIndex = 1
+local videoStartTime = nil         -- **Forward declare to ensure it's available**
+local videoIndex = 1
+local globalStartTime = nil        -- **Synchronization timestamp**
+
+-- **Determine Quadrant from Computer Label**
+local quadrantIndex = tonumber(string.sub(os.getComputerLabel() or "", -1))
+if quadrantIndex == nil or quadrantIndex < 0 or quadrantIndex > 3 then
+    error("Error: This computer's label must be 'comp0', 'comp1', 'comp2', or 'comp3'.", 0)
+end
+
+-- **Frame Sync Reference (Each Quadrant References Another)**
+local referenceComputer = {
+    ["comp0"] = nil,      -- **Main computer (no reference)**
+    ["comp1"] = "comp0",  -- **References comp0**
+    ["comp2"] = "comp0",  -- **References comp0**
+    ["comp3"] = "comp2"   -- **References comp2 (which references comp0)**
+}
+
+-- **Function Forward Declarations**
+local getMovieURL, downloadVideo, loadVideo, playVideo, nextFrame, playMovie, getFrameFromReference
+
+-- **Get Movie URL for the correct quadrant**
+function getMovieURL(index)
+    return baseURL .. index .. "_q" .. quadrantIndex .. ".nfv"
+end
+
+-- **Download video from GitHub**
+function downloadVideo(index, filename)
+    local url = getMovieURL(index)
+    print("Downloading:", url)
+
+    local startTime = os.epoch("utc")  -- Start timing download
+    local response = http.get(url)
+
+    if response then
+        local file = fs.open(filename, "wb")
+        file.write(response.readAll())
+        file.close()
+        response.close()
+
+        downloadTime = os.epoch("utc") - startTime  -- Calculate download time
+        print("Download completed:", filename)
+        return true
+    else
+        print("Failed to download:", filename)
+    end
+
+    return false
+end
+
+-- **Load video file data**
+function loadVideo(videoFile)
+    if not fs.exists(videoFile) then
+        print("Error: Video file not found!", videoFile)
+        return nil, nil
+    end
+
+    local videoData = {}
+    local file = fs.open(videoFile, "r")
+
+    if not file then
+        print("Error: Unable to open video file!", videoFile)
+        return nil, nil
+    end
+
+    for line in file.readAll():gmatch("[^\r\n]+") do
+        table.insert(videoData, line)
+    end
+    file.close()
+
+    if #videoData == 0 then
+        print("Error: Video file is empty!", videoFile)
+        return nil, nil
+    end
+
+    local resolution = { videoData[1]:match("(%d+) (%d+)") }
+    table.remove(videoData, 1)
+
+    if not resolution[1] or not resolution[2] then
+        print("Error: Invalid resolution in file:", videoFile)
+        return nil, nil
+    end
+
+    return videoData, resolution
+end
+
+-- **Sync Frame from Reference Computer**
+function getFrameFromReference()
+    if referenceComputer[os.getComputerLabel()] then
+        local ref = referenceComputer[os.getComputerLabel()]
+        local refPath = "/frame_sync_" .. ref
+
+        if fs.exists(refPath) then
+            local file = fs.open(refPath, "r")
+            local refFrame = tonumber(file.readAll())
+            file.close()
+
+            if refFrame then
+                return refFrame
+            end
+        end
+    end
+    return frameIndex
+end
+
+-- **Play Video Function**
+function playVideo(videoFile, videoStartTime, videoIndex)
+    local videoData, resolution = loadVideo(videoFile)
+    if not videoData or not resolution then
+        print("Error loading video data:", videoFile)
+        return
+    end
+
+    local frameWidth, frameHeight = tonumber(resolution[1]), tonumber(resolution[2])
+    if not frameWidth or not frameHeight then
+        print("Invalid resolution in video file:", videoFile)
+        return
+    end
+
+    local videoEndTime = videoStartTime + (videoIndex == 1 and firstVideoDuration or otherVideoDuration)
+
+    while os.epoch("utc") < videoEndTime do
+        local frameStartTime = os.epoch("utc")  -- **Start frame timer**
+        
+        -- Ensure frames advance properly
+        frameIndex = getFrameFromReference()
+        local frameSuccess = nextFrame(videoData, frameHeight, videoStartTime)
+
+        if not frameSuccess then
+            print("Warning: Frame failed to load, skipping...")
+        end
+
+        frameIndex = frameIndex + frameHeight -- Move to next frame batch
+
+        -- **Save Frame for Other Computers to Sync**
+        if os.getComputerLabel() == "comp0" or os.getComputerLabel() == "comp2" then
+            local file = fs.open("/frame_sync_" .. os.getComputerLabel(), "w")
+            file.write(tostring(frameIndex))
+            file.close()
+        end
+    end
+end
+
+-- **Advance to Next Frame**
+function nextFrame(videoData, frameHeight, videoStartTime)
+    if not videoStartTime then
+        print("Error: videoStartTime is nil")
+        return false
+    end
+
+    if frameIndex > #videoData then
+        print("Error: Frame index out of range", frameIndex, "Max:", #videoData)
+        return false
+    end
+
+    -- **Extract frame data from the video file**
+    local frameLines = {}
+    for i = 1, frameHeight do
+        if frameIndex + i > #videoData then
+            break
+        end
+        table.insert(frameLines, videoData[frameIndex + i])
+    end
+
+    if #frameLines == 0 then
+        print("Error: No frame data available at index", frameIndex)
+        return false
+    end
+
+    -- **Convert to image & display**
+    local success, imageData = pcall(paintutils.parseImage, table.concat(frameLines, "\n"))
+
+    if not success then
+        print("Error parsing frame at index:", frameIndex)
+        return false
+    end
+
+    monitor.setBackgroundColor(colors.black)
+    monitor.clear()
+    paintutils.drawImage(imageData, 1, 1)
+
+    return true
+end
+
+-- **Start Playing the Movie**
+function playMovie()
+    videoStartTime = os.epoch("utc")  -- **Ensure it's set before playback starts**
+    monitor.setBackgroundColor(colors.black)
+    monitor.clear()
+    
+    print("Preparing to play movie...")
+    os.sleep(0.75)  -- **750ms delay before first video starts**
+
+    parallel.waitForAny(
+        function()
+            while true do
+                print("Downloading video part:", videoIndex)
+                if not downloadVideo(videoIndex, "/current_video.nfv") then 
+                    print("No more video parts available, stopping playback.")
+                    break 
+                end
+
+                local nextIndex = videoIndex + 1
+                local nextFile = "/next_video.nfv"
+
+                print("Pre-downloading next part:", nextIndex)
+                downloadVideo(nextIndex, nextFile)
+
+                print("Playing video part:", videoIndex)
+                playVideo("/current_video.nfv", videoStartTime, videoIndex)
+                fs.delete("/current_video.nfv")
+
+                if fs.exists(nextFile) then
+                    fs.move(nextFile, "/current_video.nfv")
+                    videoIndex = nextIndex
+                else
+                    break
+                end
+            end
+        end
+    )
+end
+
+print("Waiting for redstone signal to start movie...")
+
+while true do
+    if redstone.getInput("back") then
+        playMovie()
+    end
+    os.sleep(0.1)
+end
